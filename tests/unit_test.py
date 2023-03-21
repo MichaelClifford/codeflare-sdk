@@ -46,10 +46,19 @@ from codeflare_sdk.cluster.model import (
     RayClusterStatus,
     CodeFlareClusterStatus,
 )
+from codeflare_sdk.job.jobs import (
+    JobDefinition,
+    Job,
+    DDPJobDefinition,
+    DDPJob,
+)
+
 import openshift
 from openshift import OpenShiftPythonException
 from openshift.selector import Selector
 import ray
+from torchx.specs import AppDryRunInfo
+from torchx.runner import get_runner, Runner
 import pytest
 
 
@@ -1517,10 +1526,9 @@ def test_cluster_status(mocker):
     status, ready = cf.status()
     assert status == CodeFlareClusterStatus.STARTING
     assert ready == False
-
-    mocker.patch(
-        "codeflare_sdk.cluster.cluster._ray_cluster_status", return_value=fake_ray
-    )
+    
+    mocker.patch("codeflare_sdk.cluster.cluster._ray_cluster_status", return_value=fake_ray)  
+    
     status, ready = cf.status()
     assert status == CodeFlareClusterStatus.STARTING
     assert ready == False
@@ -1575,3 +1583,105 @@ def test_cmd_line_generation():
     )
     os.remove("unit-test-cluster.yaml")
     os.remove("unit-cmd-cluster.yaml")
+
+def test_jobdefinition_coverage():
+    abstract = JobDefinition()
+    cluster = Cluster(test_config_creation())
+    abstract._dry_run(cluster)
+    abstract.submit(cluster)
+
+def test_job_coverage():
+    abstract = Job()
+    abstract.status()
+    abstract.logs()
+
+def test_DDPJobDefinition_creation():
+    ddp = DDPJobDefinition(
+        script="test.py",
+        m=None,
+        script_args=["test"],
+        name="test",
+        cpu=1,
+        gpu=0,
+        memMB=1024,
+        h=None,
+        j="2x1",
+        env={"test": "test"},
+        max_retries=0,
+        mounts=[],
+        rdzv_port=29500,
+        scheduler_args={}
+
+    )
+    assert ddp.script == "test.py"
+    assert ddp.m == None
+    assert ddp.script_args == ["test"]
+    assert ddp.name == "test"
+    assert ddp.cpu == 1
+    assert ddp.gpu == 0
+    assert ddp.memMB == 1024
+    assert ddp.h == None
+    assert ddp.j == "2x1"
+    assert ddp.env == {"test": "test"}
+    assert ddp.max_retries == 0
+    assert ddp.mounts == []
+    assert ddp.rdzv_port == 29500
+    assert ddp.scheduler_args == {}
+    return ddp
+
+def test_DDPJobDefinition_dry_run():
+    ddp = test_DDPJobDefinition_creation()
+    cluster = Cluster(test_config_creation())
+    ray_job = ddp._dry_run(cluster)
+    assert type(ray_job) == AppDryRunInfo
+
+  
+# wip
+# def test_DDPJobDefinition_submit(mocker):
+
+#     ddp = test_DDPJobDefinition_creation()
+#     cluster = Cluster(test_config_creation())
+#     mocker.patch(
+#         "codeflare_sdk.cluster.cluster.Cluster.cluster_dashboard_uri", return_value="fake-uri"
+#     )
+#     ray_job = ddp.submit(cluster)
+#     assert type(ray_job) == DDPJob
+
+class MockDDPJob(DDPJob):
+    def __init__(self, job_definition: "DDPJobDefinition", cluster: "Cluster"):
+        self._app_handle = job_definition._dry_run(cluster)
+       
+
+def test_DDPJob_creation(mocker):
+    ddp = test_DDPJobDefinition_creation()
+    cluster = Cluster(test_config_creation())
+    mocker.patch("codeflare_sdk.job.jobs.DDPJob", 
+                 return_value=MockDDPJob(ddp, cluster))
+    ray_job = ddp.submit(cluster)
+    return ray_job
+
+class MockTorchxRunner(Runner):
+    def __init__(self):
+        pass
+
+    def status(self, app_handle):
+        return "Passed the Test!"
+    
+    def logs(self,app_handle):
+        return "Passed the Test!"
+    
+    def dryrun(self, mocker):
+        return test_DDPJob_creation(mocker)
+
+# WIP
+# def test_DDPJob_status(mocker):
+#     mocker.patch("torchx.runner.Runner", 
+#                  side_effect=MockTorchxRunner())
+#     ray_job = test_DDPJob_creation(mocker)
+#     status = ray_job.status()
+#     assert status == "Passed the Test!"
+    
+
+def test_DDPJob_logs():
+    pass
+
