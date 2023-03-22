@@ -51,14 +51,15 @@ from codeflare_sdk.job.jobs import (
     Job,
     DDPJobDefinition,
     DDPJob,
+    torchx_runner,
 )
-
 import openshift
 from openshift import OpenShiftPythonException
 from openshift.selector import Selector
 import ray
-from torchx.specs import AppDryRunInfo
+from torchx.specs import AppDryRunInfo, AppDef
 from torchx.runner import get_runner, Runner
+from torchx.schedulers.ray_scheduler import RayJob
 import pytest
 
 
@@ -1526,9 +1527,11 @@ def test_cluster_status(mocker):
     status, ready = cf.status()
     assert status == CodeFlareClusterStatus.STARTING
     assert ready == False
-    
-    mocker.patch("codeflare_sdk.cluster.cluster._ray_cluster_status", return_value=fake_ray)  
-    
+
+    mocker.patch(
+        "codeflare_sdk.cluster.cluster._ray_cluster_status", return_value=fake_ray
+    )
+
     status, ready = cf.status()
     assert status == CodeFlareClusterStatus.STARTING
     assert ready == False
@@ -1584,16 +1587,19 @@ def test_cmd_line_generation():
     os.remove("unit-test-cluster.yaml")
     os.remove("unit-cmd-cluster.yaml")
 
+
 def test_jobdefinition_coverage():
     abstract = JobDefinition()
     cluster = Cluster(test_config_creation())
     abstract._dry_run(cluster)
     abstract.submit(cluster)
 
+
 def test_job_coverage():
     abstract = Job()
     abstract.status()
     abstract.logs()
+
 
 def test_DDPJobDefinition_creation():
     ddp = DDPJobDefinition(
@@ -1610,8 +1616,7 @@ def test_DDPJobDefinition_creation():
         max_retries=0,
         mounts=[],
         rdzv_port=29500,
-        scheduler_args={}
-
+        scheduler_args={"requirements": "test"},
     )
     assert ddp.script == "test.py"
     assert ddp.m == None
@@ -1626,62 +1631,81 @@ def test_DDPJobDefinition_creation():
     assert ddp.max_retries == 0
     assert ddp.mounts == []
     assert ddp.rdzv_port == 29500
-    assert ddp.scheduler_args == {}
+    assert ddp.scheduler_args == {"requirements": "test"}
     return ddp
 
+
 def test_DDPJobDefinition_dry_run():
+    """
+    Test that the dry run method returns the correct type: AppDryRunInfo
+    And that the attributes of the returned object are of the correct type
+    """
     ddp = test_DDPJobDefinition_creation()
     cluster = Cluster(test_config_creation())
-    ray_job = ddp._dry_run(cluster)
-    assert type(ray_job) == AppDryRunInfo
+    ddp_job = ddp._dry_run(cluster)
+    assert type(ddp_job) == AppDryRunInfo
+    assert ddp_job._fmt is not None
+    assert type(ddp_job.request) == RayJob
+    assert type(ddp_job._app) == AppDef
+    assert type(ddp_job._cfg) == type(dict())
+    assert type(ddp_job._scheduler) == type(str())
 
-  
-# wip
-# def test_DDPJobDefinition_submit(mocker):
 
-#     ddp = test_DDPJobDefinition_creation()
-#     cluster = Cluster(test_config_creation())
-#     mocker.patch(
-#         "codeflare_sdk.cluster.cluster.Cluster.cluster_dashboard_uri", return_value="fake-uri"
-#     )
-#     ray_job = ddp.submit(cluster)
-#     assert type(ray_job) == DDPJob
+def test_DDPJobDefinition_submit(mocker):
+    """
+    Tests that the submit method returns the correct type: DDPJob
+    And that the attributes of the returned object are of the correct type
+    """
+    ddp_def = test_DDPJobDefinition_creation()
+    cluster = Cluster(test_config_creation())
+    mocker.patch(
+        "codeflare_sdk.job.jobs.torchx_runner.schedule",
+        return_value="fake-dashboard-url",
+    )  # a fake app_handle
+    ddp_job = ddp_def.submit(cluster)
+    assert type(ddp_job) == DDPJob
+    assert type(ddp_job.job_definition) == DDPJobDefinition
+    assert type(ddp_job.cluster) == Cluster
+    assert type(ddp_job._app_handle) == str
+    assert ddp_job._app_handle == "fake-dashboard-url"
 
-class MockDDPJob(DDPJob):
-    def __init__(self, job_definition: "DDPJobDefinition", cluster: "Cluster"):
-        self._app_handle = job_definition._dry_run(cluster)
-       
 
 def test_DDPJob_creation(mocker):
-    ddp = test_DDPJobDefinition_creation()
+    ddp_def = test_DDPJobDefinition_creation()
     cluster = Cluster(test_config_creation())
-    mocker.patch("codeflare_sdk.job.jobs.DDPJob", 
-                 return_value=MockDDPJob(ddp, cluster))
-    ray_job = ddp.submit(cluster)
-    return ray_job
+    mocker.patch(
+        "codeflare_sdk.job.jobs.torchx_runner.schedule",
+        return_value="fake-dashboard-url",
+    )  # a fake app_handle
+    ddp_job = DDPJob(ddp_def, cluster)
+    assert type(ddp_job) == DDPJob
+    assert type(ddp_job.job_definition) == DDPJobDefinition
+    assert type(ddp_job.cluster) == Cluster
+    assert type(ddp_job._app_handle) == str
+    assert ddp_job._app_handle == "fake-dashboard-url"
+    _, args, kwargs = torchx_runner.schedule.mock_calls[0]
+    assert type(args[0]) == AppDryRunInfo
+    job_info = args[0]
+    assert type(job_info.request) == RayJob
+    assert type(job_info._app) == AppDef
+    assert type(job_info._cfg) == type(dict())
+    assert type(job_info._scheduler) == type(str())
+    return ddp_job
 
-class MockTorchxRunner(Runner):
-    def __init__(self):
-        pass
 
-    def status(self, app_handle):
-        return "Passed the Test!"
-    
-    def logs(self,app_handle):
-        return "Passed the Test!"
-    
-    def dryrun(self, mocker):
-        return test_DDPJob_creation(mocker)
+def test_DDPJob_status(mocker):
+    ddp_job = test_DDPJob_creation(mocker)
+    mocker.patch(
+        "codeflare_sdk.job.jobs.torchx_runner.status", return_value="fake-status"
+    )
+    assert len(torchx_runner.status.mock_calls) == 0
+    assert ddp_job.status() == "fake-status"
 
-# WIP
-# def test_DDPJob_status(mocker):
-#     mocker.patch("torchx.runner.Runner", 
-#                  side_effect=MockTorchxRunner())
-#     ray_job = test_DDPJob_creation(mocker)
-#     status = ray_job.status()
-#     assert status == "Passed the Test!"
-    
 
-def test_DDPJob_logs():
-    pass
-
+def test_DDPJob_logs(mocker):
+    ddp_job = test_DDPJob_creation(mocker)
+    mocker.patch(
+        "codeflare_sdk.job.jobs.torchx_runner.log_lines", return_value="fake-logs"
+    )
+    assert len(torchx_runner.log_lines.mock_calls) == 0
+    assert ddp_job.logs() == "fake-logs"
