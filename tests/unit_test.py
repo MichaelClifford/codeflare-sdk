@@ -16,6 +16,7 @@ from pathlib import Path
 import sys
 import filecmp
 import os
+import re
 
 parent = Path(__file__).resolve().parents[1]
 sys.path.append(str(parent) + "/src")
@@ -1637,8 +1638,9 @@ def test_DDPJobDefinition_creation():
 
 def test_DDPJobDefinition_dry_run():
     """
-    Test that the dry run method returns the correct type: AppDryRunInfo
-    And that the attributes of the returned object are of the correct type
+    Test that the dry run method returns the correct type: AppDryRunInfo,
+    that the attributes of the returned object are of the correct type,
+    and that the values from cluster and job definition are correctly passed.
     """
     ddp = test_DDPJobDefinition_creation()
     cluster = Cluster(test_config_creation())
@@ -1649,6 +1651,49 @@ def test_DDPJobDefinition_dry_run():
     assert type(ddp_job._app) == AppDef
     assert type(ddp_job._cfg) == type(dict())
     assert type(ddp_job._scheduler) == type(str())
+
+    assert ddp_job.request.app_id.startswith("test")
+    assert ddp_job.request.working_dir.startswith("/tmp/torchx_workspace")
+    assert ddp_job.request.cluster_name == "unit-test-cluster"
+    assert ddp_job.request.requirements == "test"
+
+    assert ddp_job._app.roles[0].resource.cpu == 1
+    assert ddp_job._app.roles[0].resource.gpu == 0
+    assert ddp_job._app.roles[0].resource.memMB == 1024
+
+    assert ddp_job._cfg["cluster_name"] == "unit-test-cluster"
+    assert ddp_job._cfg["requirements"] == "test"
+
+    assert ddp_job._scheduler == "ray"
+
+
+def test_DDPJobDefinition_dry_run_no_resource_args():
+    """
+    Test that the dry run correctly gets resources from the cluster object
+    when the job definition does not specify resources.
+    """
+    cluster = Cluster(test_config_creation())
+    ddp = DDPJobDefinition(
+        script="test.py",
+        m=None,
+        script_args=["test"],
+        name="test",
+        h=None,
+        env={"test": "test"},
+        max_retries=0,
+        mounts=[],
+        rdzv_port=29500,
+        scheduler_args={"requirements": "test"},
+    )
+    ddp_job = ddp._dry_run(cluster)
+
+    assert ddp_job._app.roles[0].resource.cpu == cluster.config.max_cpus
+    assert ddp_job._app.roles[0].resource.gpu == cluster.config.gpu
+    assert ddp_job._app.roles[0].resource.memMB == cluster.config.max_memory * 1024
+    assert (
+        parse_j(ddp_job._app.roles[0].args[1])
+        == f"{cluster.config.max_worker}x{cluster.config.gpu}"
+    )
 
 
 def test_DDPJobDefinition_submit(mocker):
@@ -1698,8 +1743,9 @@ def test_DDPJob_status(mocker):
     mocker.patch(
         "codeflare_sdk.job.jobs.torchx_runner.status", return_value="fake-status"
     )
-    assert len(torchx_runner.status.mock_calls) == 0
     assert ddp_job.status() == "fake-status"
+    _, args, kwargs = torchx_runner.status.mock_calls[0]
+    assert args[0] == "fake-dashboard-url"
 
 
 def test_DDPJob_logs(mocker):
@@ -1707,5 +1753,20 @@ def test_DDPJob_logs(mocker):
     mocker.patch(
         "codeflare_sdk.job.jobs.torchx_runner.log_lines", return_value="fake-logs"
     )
-    assert len(torchx_runner.log_lines.mock_calls) == 0
     assert ddp_job.logs() == "fake-logs"
+    _, args, kwargs = torchx_runner.log_lines.mock_calls[0]
+    assert args[0] == "fake-dashboard-url"
+
+
+def parse_j(cmd):
+
+    pattern = r"--nnodes\s+\d+\s+--nproc_per_node\s+\d+"
+    match = re.search(pattern, cmd)
+    if match:
+        substring = match.group(0)
+    else:
+        return None
+    args = substring.split()
+    max_worker = args[1]
+    gpu = args[3]
+    return f"{max_worker}x{gpu}"
